@@ -198,7 +198,7 @@ class RsyncManager:
                         f.write(line)
 
                 # Extract and report progress
-                if progress_callback and job.track_progress:
+                if progress_callback:
                     sync_progress = parse_rsync_progress(line)
                     if sync_progress:
                         progress_callback(sync_progress)
@@ -304,6 +304,7 @@ class RsyncManager:
         self,
         job_name: str,
         progress_callback: Optional[Callable[[SyncProgress], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
         use_retry: bool = True,
     ) -> SyncResult:
         """
@@ -346,9 +347,15 @@ class RsyncManager:
             # Handle compression if needed
             if job.use_compression and result.success:
                 try:
+                    if status_callback:
+                        status_callback("Compressing synced files...")
                     self.compression_manager.compress_and_cleanup(job.local_path)
+                    if status_callback:
+                        status_callback("Compression complete")
                 except Exception as e:
                     logger.error(f"Compression failed for job '{job_name}': {e}")
+                    if status_callback:
+                        status_callback(f"Compression failed: {e}")
                     # Don't fail the whole sync if compression fails
                     # The data is already synced successfully
 

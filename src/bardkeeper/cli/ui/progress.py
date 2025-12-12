@@ -148,7 +148,19 @@ class SyncProgressDisplay:
                     completed=sync_progress.percent,
                 )
                 self._last_percent = sync_progress.percent
-        elif not self.track_progress and status:
+        elif status:
+            # Update status for spinner mode or status messages
+            if self.track_progress:
+                # Still in progress mode but show status
+                pass
+            else:
+                self._progress.update(self._task_id, status=status)
+
+    def set_status(self, status: str):
+        """Set status message (for spinner mode)."""
+        if not self._progress or self._task_id is None:
+            return
+        if not self.track_progress:
             self._progress.update(self._task_id, status=status)
 
     def set_error(self, error: str):

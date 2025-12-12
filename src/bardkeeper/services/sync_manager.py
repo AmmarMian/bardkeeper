@@ -195,6 +195,7 @@ class SyncManager:
         self,
         name: str,
         progress_callback: Optional[Callable[[SyncProgress], None]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
         use_retry: bool = True,
     ):
         """
@@ -203,6 +204,7 @@ class SyncManager:
         Args:
             name: Job name
             progress_callback: Optional progress callback
+            status_callback: Optional status message callback
             use_retry: Whether to use retry logic
 
         Returns:
@@ -215,7 +217,7 @@ class SyncManager:
         """
         # Acquire lock for this job
         with self.lock_manager.acquire_job_lock(name):
-            return self.rsync.sync(name, progress_callback, use_retry)
+            return self.rsync.sync(name, progress_callback, status_callback, use_retry)
 
     def should_sync_now(self, job: Job) -> bool:
         """

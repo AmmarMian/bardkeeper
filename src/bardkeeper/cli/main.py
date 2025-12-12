@@ -7,10 +7,19 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-import click
+import rich_click as click
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+
+# Configure rich_click
+click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.USE_MARKDOWN = False
+click.rich_click.SHOW_ARGUMENTS = True
+click.rich_click.GROUP_ARGUMENTS_OPTIONS = True
+click.rich_click.STYLE_ERRORS_SUGGESTION = "magenta italic"
+click.rich_click.ERRORS_SUGGESTION = ""
+click.rich_click.MAX_WIDTH = 100
 
 from ..data.database import BardkeeperDB, DEFAULT_DB_PATH
 from ..core.rsync import RsyncManager
@@ -186,38 +195,85 @@ def remove_job(name, remove_files):
 
 # === SYNC COMMAND ===
 @cli.command("sync")
-@click.argument('name')
+@click.argument('name', required=False)
 @click.option('--no-retry', is_flag=True, help='Disable automatic retry on failure')
-def sync_job(name, no_retry):
-    """Sync a specific job."""
+@click.option('--all', 'sync_all', is_flag=True, help='Sync all jobs')
+def sync_job(name, no_retry, sync_all):
+    """Sync one or more jobs. If no name is provided, shows interactive menu."""
     try:
-        job = app_ctx.db.get_sync_job(name)
-        if not job:
-            raise JobNotFoundError(f"No sync job found with name '{name}'")
+        # Get all jobs
+        jobs = app_ctx.db.get_all_sync_jobs()
+        if not jobs:
+            console.print("[yellow]No sync jobs found. Add one with 'bardkeeper add'.[/yellow]")
+            return
 
-        # Create progress display
-        with SyncProgressDisplay(name, track_progress=job.track_progress) as progress:
-            def progress_callback(sync_progress):
-                progress.update(sync_progress)
+        # Determine which jobs to sync
+        jobs_to_sync = []
 
-            # Execute sync
-            result = app_ctx.sync_manager.sync_job(
-                name,
-                progress_callback=progress_callback,
-                use_retry=not no_retry
-            )
-
-        if result.success:
-            duration_str = f"{result.duration:.2f}s"
-            console.print(
-                f"[green]✓[/green] Successfully synced '[cyan]{name}[/cyan]' "
-                f"in {duration_str}"
-            )
+        if sync_all:
+            jobs_to_sync = [j.name for j in jobs]
+        elif name:
+            # Check if job exists
+            if not app_ctx.db.get_sync_job(name):
+                raise JobNotFoundError(f"No sync job found with name '{name}'")
+            jobs_to_sync = [name]
         else:
-            console.print(f"[bold red]✗[/bold red] Sync failed for '[cyan]{name}[/cyan]'")
-            if result.error_message:
-                console.print(f"[red]{result.error_message}[/red]")
-            sys.exit(1)
+            # Interactive mode
+            job_names = [j.name for j in jobs]
+            job_names.append("All jobs")
+            job_names.append("Cancel")
+
+            selection = select_from_menu("Select job to sync:", job_names)
+
+            if not selection or selection == "Cancel":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return
+            elif selection == "All jobs":
+                jobs_to_sync = [j.name for j in jobs]
+            else:
+                jobs_to_sync = [selection]
+
+        # Sync each job
+        for job_name in jobs_to_sync:
+            job = app_ctx.db.get_sync_job(job_name)
+            if not job:
+                console.print(f"[red]Job '{job_name}' not found, skipping.[/red]")
+                continue
+
+            console.print(f"\n[bold cyan]Syncing job: {job_name}[/bold cyan]")
+
+            # Create progress display
+            with SyncProgressDisplay(job_name, track_progress=job.track_progress) as progress_display:
+                def progress_callback(sync_progress):
+                    progress_display.update(sync_progress)
+
+                def status_callback(status):
+                    if not job.track_progress:
+                        progress_display.set_status(status)
+                    else:
+                        console.print(f"  [dim]{status}[/dim]")
+
+                # Execute sync
+                result = app_ctx.sync_manager.sync_job(
+                    job_name,
+                    progress_callback=progress_callback,
+                    status_callback=status_callback,
+                    use_retry=not no_retry
+                )
+
+            if result.success:
+                duration_str = f"{result.duration:.2f}s"
+                mb_transferred = result.bytes_transferred / (1024 * 1024) if result.bytes_transferred > 0 else 0
+                console.print(
+                    f"[green]✓[/green] Successfully synced '[cyan]{job_name}[/cyan]' "
+                    f"in {duration_str} ({mb_transferred:.2f} MB)"
+                )
+            else:
+                console.print(f"[bold red]✗[/bold red] Sync failed for '[cyan]{job_name}[/cyan]'")
+                if result.error_message:
+                    console.print(f"[red]{result.error_message}[/red]")
+                if len(jobs_to_sync) == 1:  # Only exit if syncing single job
+                    sys.exit(1)
 
     except SyncAlreadyRunningError as e:
         console.print(f"[bold yellow]{str(e)}[/bold yellow]")
@@ -298,23 +354,42 @@ def show_config():
 
 # === MANAGE COMMAND ===
 @cli.command("manage")
-@click.argument('name')
+@click.argument('name', required=False)
 def manage_job(name):
-    """Edit settings for an existing sync job."""
+    """Manage jobs - edit or delete. If no name provided, shows interactive menu."""
     try:
+        # Get all jobs
+        jobs = app_ctx.db.get_all_sync_jobs()
+        if not jobs:
+            console.print("[yellow]No sync jobs found. Add one with 'bardkeeper add'.[/yellow]")
+            return
+
+        # Select job if not provided
+        if not name:
+            job_names = [j.name for j in jobs]
+            job_names.append("Cancel")
+
+            name = select_from_menu("Select job to manage:", job_names)
+
+            if not name or name == "Cancel":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return
+
         job = app_ctx.db.get_sync_job(name)
         if not job:
             raise JobNotFoundError(f"No sync job found with name '{name}'")
 
         # Show current settings
-        console.print(f"[cyan]Current settings for job '{name}':[/cyan]")
+        console.print(f"\n[cyan]Job: {name}[/cyan]")
         job_dict = job.to_dict()
         table = job_info_table(job_dict)
         console.print(table)
 
-        # Prompt for changes
-        from rich.prompt import Confirm
-        if Confirm.ask("Edit settings?"):
+        # Ask what to do
+        actions = ["Edit settings", "Delete job", "Cancel"]
+        action = select_from_menu("\nWhat would you like to do?", actions)
+
+        if action == "Edit settings":
             details = prompt_for_job_details(job_dict)
             # Remove name from details (can't change name)
             details.pop('name', None)
@@ -322,6 +397,23 @@ def manage_job(name):
             if details:
                 app_ctx.sync_manager.update_job(name, **details)
                 console.print(f"[green]✓[/green] Updated job '[cyan]{name}[/cyan]'")
+
+        elif action == "Delete job":
+            from rich.prompt import Confirm
+
+            remove_files = Confirm.ask(
+                "Also remove local files and archives?",
+                default=False
+            )
+
+            if Confirm.ask(f"[bold red]Delete job '{name}'?[/bold red]"):
+                app_ctx.sync_manager.remove_sync_job(name, remove_files=remove_files)
+                console.print(f"[green]✓[/green] Deleted job '[cyan]{name}[/cyan]'")
+            else:
+                console.print("[yellow]Cancelled.[/yellow]")
+
+        else:
+            console.print("[yellow]Cancelled.[/yellow]")
 
     except JobNotFoundError as e:
         console.print(f"[bold red]{str(e)}[/bold red]")
