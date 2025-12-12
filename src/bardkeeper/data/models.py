@@ -19,6 +19,13 @@ class SyncStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class SyncDirection(str, Enum):
+    """Direction of sync operation."""
+    PULL = "pull"  # Remote → Local (download/backup)
+    PUSH = "push"  # Local → Remote (upload)
+    BIDIRECTIONAL = "bidirectional"  # Both ways (based on modification times)
+
+
 class Job(BaseModel):
     """Sync job configuration with validation."""
 
@@ -41,6 +48,7 @@ class Job(BaseModel):
     track_progress: bool = True
     bandwidth_limit: Optional[int] = None
     exclude_patterns: list[str] = Field(default_factory=list)
+    sync_direction: SyncDirection = SyncDirection.PULL
 
     # Scheduling
     cron_schedule: Optional[str] = None
@@ -81,8 +89,9 @@ class Job(BaseModel):
         # Convert datetime to ISO format
         if data.get('last_synced'):
             data['last_synced'] = data['last_synced'].isoformat()
-        # Convert enum to string
+        # Convert enums to strings
         data['sync_status'] = data['sync_status'].value
+        data['sync_direction'] = data['sync_direction'].value
         return data
 
     @classmethod

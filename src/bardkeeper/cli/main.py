@@ -11,6 +11,7 @@ import rich_click as click
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm
 
 # Configure rich_click
 click.rich_click.USE_RICH_MARKUP = True
@@ -22,6 +23,7 @@ click.rich_click.ERRORS_SUGGESTION = ""
 click.rich_click.MAX_WIDTH = 100
 
 from ..data.database import BardkeeperDB, DEFAULT_DB_PATH
+from ..data.models import SyncDirection
 from ..core.rsync import RsyncManager
 from ..core.compression import CompressionManager
 from ..services.sync_manager import SyncManager
@@ -223,7 +225,11 @@ def remove_job(name, remove_files):
 @click.argument('name', required=False)
 @click.option('--no-retry', is_flag=True, help='Disable automatic retry on failure')
 @click.option('--all', 'sync_all', is_flag=True, help='Sync all jobs')
-def sync_job(name, no_retry, sync_all):
+@click.option('--pull', 'override_direction', flag_value='pull', help='Override to pull direction (remote → local)')
+@click.option('--push', 'override_direction', flag_value='push', help='Override to push direction (local → remote)')
+@click.option('--bidirectional', 'override_direction', flag_value='bidirectional', help='Override to bidirectional sync')
+@click.option('--yes', '-y', 'skip_confirm', is_flag=True, help='Skip confirmation prompts')
+def sync_job(name, no_retry, sync_all, override_direction, skip_confirm):
     """Sync one or more jobs. If no name is provided, shows interactive menu."""
     try:
         # Get all jobs
@@ -258,12 +264,42 @@ def sync_job(name, no_retry, sync_all):
             else:
                 jobs_to_sync = [selection]
 
+        # Map string direction to enum
+        sync_direction_override = None
+        if override_direction:
+            direction_map = {
+                'pull': SyncDirection.PULL,
+                'push': SyncDirection.PUSH,
+                'bidirectional': SyncDirection.BIDIRECTIONAL
+            }
+            sync_direction_override = direction_map[override_direction]
+
         # Sync each job
         for job_name in jobs_to_sync:
             job = app_ctx.db.get_sync_job(job_name)
             if not job:
                 console.print(f"[red]Job '{job_name}' not found, skipping.[/red]")
                 continue
+
+            # Determine effective sync direction
+            effective_direction = sync_direction_override or job.sync_direction
+
+            # Show confirmation for risky operations
+            if not skip_confirm:
+                if effective_direction == SyncDirection.PUSH:
+                    console.print("[bold yellow]⚠️  Push will overwrite remote files[/bold yellow]")
+                    if not Confirm.ask("Continue with push?", default=False):
+                        console.print("[yellow]Cancelled.[/yellow]")
+                        continue
+
+                elif effective_direction == SyncDirection.BIDIRECTIONAL:
+                    console.print("[bold yellow]⚠️  Bidirectional Sync Warnings:[/bold yellow]")
+                    console.print("  • Last-write-wins (no conflict resolution)")
+                    console.print("  • Modification time based")
+                    console.print("  • Cannot detect renamed files")
+                    if not Confirm.ask("Continue with bidirectional sync?", default=False):
+                        console.print("[yellow]Cancelled.[/yellow]")
+                        continue
 
             console.print(f"\n[bold cyan]Syncing job: {job_name}[/bold cyan]")
 
@@ -283,7 +319,8 @@ def sync_job(name, no_retry, sync_all):
                     job_name,
                     progress_callback=progress_callback,
                     status_callback=status_callback,
-                    use_retry=not no_retry
+                    use_retry=not no_retry,
+                    sync_direction=sync_direction_override
                 )
 
             if result.success:

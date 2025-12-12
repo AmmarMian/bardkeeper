@@ -10,7 +10,7 @@ from typing import Optional
 from tinydb import TinyDB, Query
 
 from ..exceptions import JobNotFoundError, JobExistsError, DatabaseError
-from .models import Job, Config, SyncStatus
+from .models import Job, Config, SyncStatus, SyncDirection
 
 DEFAULT_DB_PATH = Path("~/.bardkeeper/database.json").expanduser()
 
@@ -63,6 +63,7 @@ class BardkeeperDB:
         delete_remote: bool = True,
         bandwidth_limit: Optional[int] = None,
         exclude_patterns: list[str] = None,
+        sync_direction: SyncDirection = SyncDirection.PULL,
     ) -> Job:
         """Add a new sync job to the database with validation."""
         JobQuery = Query()
@@ -95,6 +96,7 @@ class BardkeeperDB:
             delete_remote=delete_remote,
             bandwidth_limit=bandwidth_limit,
             exclude_patterns=exclude_patterns or [],
+            sync_direction=sync_direction,
             sync_status=SyncStatus.NEVER_RUN,
             last_synced=None,
         )

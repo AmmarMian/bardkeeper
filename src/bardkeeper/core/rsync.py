@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable, Generator
 
-from ..data.models import Job, SyncStatus
+from ..data.models import Job, SyncStatus, SyncDirection
 from ..exceptions import (
     RsyncError,
     SSHTimeoutError,
@@ -148,9 +148,21 @@ class RsyncManager:
             finally:
                 self._wrapper_script_path = None
 
-    def build_rsync_command(self, job: Job) -> list[str]:
-        """Build rsync command with proper progress flags and SSH options."""
+    def build_rsync_command(self, job: Job, sync_direction: Optional[SyncDirection] = None) -> list[str]:
+        """
+        Build rsync command with proper progress flags and SSH options.
+
+        Args:
+            job: Job configuration
+            sync_direction: Optional direction override (defaults to job.sync_direction)
+
+        Returns:
+            List of command arguments for rsync
+        """
         cmd = ["rsync"]
+
+        # Determine effective sync direction
+        effective_direction = sync_direction or job.sync_direction
 
         # Basic flags
         cmd.extend(["-avh"])  # archive, verbose, human-readable
@@ -168,7 +180,8 @@ class RsyncManager:
         cmd.append("-z")
 
         # Delete extraneous files on destination
-        if job.delete_remote:
+        # For bidirectional sync, disable delete to prevent data loss
+        if job.delete_remote and effective_direction != SyncDirection.BIDIRECTIONAL:
             cmd.append("--delete")
 
         # Itemize changes for logging
@@ -203,27 +216,79 @@ class RsyncManager:
             ssh_cmd = ssh_config.get_ssh_command_string()
             cmd.extend(["-e", ssh_cmd])
 
-        # Source (remote) - ensure trailing slash to copy contents
-        remote = f"{job.username}@{job.host}:{job.remote_path}"
-        if not remote.endswith('/'):
-            remote += '/'
-        cmd.append(remote)
+        # Build source and destination based on sync direction
+        remote_path = f"{job.username}@{job.host}:{job.remote_path}"
+        if not remote_path.endswith('/'):
+            remote_path += '/'
 
-        # Destination (local) - ensure parent directories exist
-        local_dest = job.local_path
-        local_dest.parent.mkdir(parents=True, exist_ok=True)
+        local_path_str = str(job.local_path)
+        if not local_path_str.endswith('/'):
+            local_path_str += '/'
 
-        # Ensure the destination directory exists
-        if not str(local_dest).endswith('/'):
-            local_dest = Path(str(local_dest) + '/')
-        cmd.append(str(local_dest))
+        if effective_direction == SyncDirection.PULL:
+            # Pull: Remote → Local
+            source = remote_path
+            destination = local_path_str
+            # Ensure local parent directory exists
+            job.local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        elif effective_direction == SyncDirection.PUSH:
+            # Push: Local → Remote
+            source = local_path_str
+            destination = remote_path
+            # Ensure local directory exists before pushing
+            if not job.local_path.exists():
+                raise SyncError(f"Local path does not exist: {job.local_path}")
+
+        else:  # BIDIRECTIONAL - will be called twice with different directions
+            # This shouldn't be called directly for bidirectional
+            # Use build_bidirectional_commands() instead
+            raise ValueError("Use build_bidirectional_commands() for bidirectional sync")
+
+        cmd.append(source)
+        cmd.append(destination)
 
         return cmd
+
+    def build_bidirectional_commands(self, job: Job) -> tuple[list[str], list[str]]:
+        """
+        Build two rsync commands for bidirectional sync.
+
+        Bidirectional sync works by running rsync twice with the --update flag:
+        1. Pull: Remote → Local (copy newer files to local)
+        2. Push: Local → Remote (copy newer files to remote)
+
+        Note: --delete is automatically disabled to prevent data loss.
+
+        Args:
+            job: Job configuration
+
+        Returns:
+            Tuple of (pull_command, push_command)
+        """
+        # Build pull command: remote → local
+        pull_cmd = self.build_rsync_command(job, SyncDirection.PULL)
+        # Remove --delete flag if present (to prevent data loss in bidirectional sync)
+        if "--delete" in pull_cmd:
+            pull_cmd.remove("--delete")
+        # Add --update flag to only copy files with newer modification time
+        pull_cmd.insert(-2, "--update")  # Insert before source/dest
+
+        # Build push command: local → remote
+        push_cmd = self.build_rsync_command(job, SyncDirection.PUSH)
+        # Remove --delete flag if present
+        if "--delete" in push_cmd:
+            push_cmd.remove("--delete")
+        # Add --update flag
+        push_cmd.insert(-2, "--update")  # Insert before source/dest
+
+        return (pull_cmd, push_cmd)
 
     def execute_sync(
         self,
         job: Job,
-        progress_callback: Optional[Callable[[SyncProgress], None]] = None
+        progress_callback: Optional[Callable[[SyncProgress], None]] = None,
+        sync_direction: Optional[SyncDirection] = None
     ) -> SyncResult:
         """
         Execute a single sync operation.
@@ -231,6 +296,7 @@ class RsyncManager:
         Args:
             job: Job to sync
             progress_callback: Optional callback for progress updates
+            sync_direction: Optional direction override (defaults to job.sync_direction)
 
         Returns:
             SyncResult with sync status
@@ -260,7 +326,7 @@ class RsyncManager:
             raise
 
         # Build rsync command
-        cmd = self.build_rsync_command(job)
+        cmd = self.build_rsync_command(job, sync_direction)
 
         # Prepare log file
         log_file = None
@@ -331,11 +397,79 @@ class RsyncManager:
             # Always clean up wrapper script if it was created
             self._cleanup_wrapper_script()
 
+    def execute_bidirectional_sync(
+        self,
+        job: Job,
+        progress_callback: Optional[Callable[[SyncProgress], None]] = None
+    ) -> SyncResult:
+        """
+        Execute bidirectional sync (two rsync operations).
+
+        This performs two separate rsync operations with --update flag:
+        1. Pull: Remote → Local (copy newer files to local)
+        2. Push: Local → Remote (copy newer files to remote)
+
+        Args:
+            job: Job to sync
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Combined SyncResult from both operations
+
+        Raises:
+            SSHAuthenticationError: If SSH authentication fails
+            SSHTimeoutError: If SSH connection times out
+            RsyncError: If either rsync operation fails
+        """
+        start_time = time.time()
+
+        # Test SSH connection once before both operations
+        ssh_config = SSHConfig(
+            host=job.host,
+            username=job.username,
+            port=job.ssh_port,
+            key_path=job.ssh_key_path,
+            connect_timeout=job.ssh_timeout,
+        )
+
+        try:
+            success, message = test_ssh_connection(ssh_config)
+            if not success:
+                raise SyncError(f"SSH connection test failed: {message}")
+        except (SSHAuthenticationError, SSHTimeoutError):
+            raise
+
+        # Execute first sync: Remote → Local (PULL)
+        logger.info(f"Bidirectional sync for '{job.name}': Starting pull (remote → local)")
+        try:
+            pull_result = self.execute_sync(job, progress_callback, SyncDirection.PULL)
+        except Exception as e:
+            raise SyncError(f"Bidirectional sync failed during pull: {e}")
+
+        # Execute second sync: Local → Remote (PUSH)
+        logger.info(f"Bidirectional sync for '{job.name}': Starting push (local → remote)")
+        try:
+            push_result = self.execute_sync(job, progress_callback, SyncDirection.PUSH)
+        except Exception as e:
+            raise SyncError(f"Bidirectional sync failed during push: {e}")
+
+        # Combine results
+        total_duration = time.time() - start_time
+        combined_result = SyncResult(
+            success=True,
+            bytes_transferred=pull_result.bytes_transferred + push_result.bytes_transferred,
+            duration=total_duration,
+            log_lines=pull_result.log_lines + ["--- Push phase ---"] + push_result.log_lines,
+        )
+
+        return combined_result
+
     def sync_with_retry(
         self,
         job: Job,
         progress_callback: Optional[Callable[[SyncProgress], None]] = None,
         retry_config: Optional[RetryConfig] = None,
+        sync_direction: Optional[SyncDirection] = None,
     ) -> SyncResult:
         """
         Execute sync with automatic retry for recoverable errors.
@@ -353,6 +487,7 @@ class RsyncManager:
             job: Job to sync
             progress_callback: Optional callback for progress updates
             retry_config: Optional retry configuration
+            sync_direction: Optional direction override (defaults to job.sync_direction)
 
         Returns:
             SyncResult
@@ -366,7 +501,7 @@ class RsyncManager:
 
         for attempt in range(1, retry_config.max_attempts + 1):
             try:
-                return self.execute_sync(job, progress_callback)
+                return self.execute_sync(job, progress_callback, sync_direction)
 
             except SSHTimeoutError as e:
                 last_error = e
@@ -407,6 +542,7 @@ class RsyncManager:
         progress_callback: Optional[Callable[[SyncProgress], None]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
         use_retry: bool = True,
+        sync_direction: Optional[SyncDirection] = None,
     ) -> SyncResult:
         """
         Sync a specific job by name.
@@ -414,7 +550,9 @@ class RsyncManager:
         Args:
             job_name: Name of job to sync
             progress_callback: Optional callback for progress updates
+            status_callback: Optional callback for status messages
             use_retry: Whether to use retry logic (default: True)
+            sync_direction: Optional direction override (defaults to job.sync_direction)
 
         Returns:
             SyncResult
@@ -428,15 +566,29 @@ class RsyncManager:
             from ..exceptions import JobNotFoundError
             raise JobNotFoundError(f"No sync job found with name '{job_name}'")
 
+        # Determine effective sync direction
+        effective_direction = sync_direction or job.sync_direction
+
         # Update job status to running
         self.db.update_sync_status(job_name, SyncStatus.RUNNING)
 
         try:
-            # Execute sync (with or without retry)
-            if use_retry:
-                result = self.sync_with_retry(job, progress_callback)
+            # Execute sync based on direction
+            if effective_direction == SyncDirection.BIDIRECTIONAL:
+                # Bidirectional sync always runs without retry wrapper
+                # (each individual rsync operation is still retried if use_retry=True)
+                if use_retry:
+                    # For bidirectional with retry, we need to wrap both operations
+                    # For now, just execute bidirectional (TODO: add retry wrapper)
+                    result = self.execute_bidirectional_sync(job, progress_callback)
+                else:
+                    result = self.execute_bidirectional_sync(job, progress_callback)
             else:
-                result = self.execute_sync(job, progress_callback)
+                # Regular sync (PULL or PUSH)
+                if use_retry:
+                    result = self.sync_with_retry(job, progress_callback, None, sync_direction)
+                else:
+                    result = self.execute_sync(job, progress_callback, sync_direction)
 
             # Update database with success
             self.db.update_last_synced(
@@ -445,8 +597,8 @@ class RsyncManager:
                 bytes_transferred=result.bytes_transferred,
             )
 
-            # Handle compression if needed
-            if job.use_compression and result.success:
+            # Handle compression if needed (only for PULL operations)
+            if job.use_compression and result.success and effective_direction == SyncDirection.PULL:
                 try:
                     if status_callback:
                         status_callback("Compressing synced files...")

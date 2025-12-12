@@ -412,5 +412,210 @@ class TestOpenRsyncWrapper(unittest.TestCase):
         self.assertIsNone(rsync_manager._wrapper_script_path)
 
 
+class TestSyncDirection(unittest.TestCase):
+    """Test cases for sync direction functionality"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_db.json"
+        self.db = BardkeeperDB(self.db_path)
+
+        # Create a mock job
+        self.job_name = "test_job"
+        self.db.add_sync_job(
+            name=self.job_name,
+            host="test_host",
+            username="test_user",
+            remote_path="/remote/path",
+            local_path=Path(self.temp_dir.name) / "local_path",
+            use_compression=False,
+            cron_schedule=None,
+            track_progress=True
+        )
+
+    def tearDown(self):
+        """Tear down test fixtures"""
+        self.temp_dir.cleanup()
+
+    def test_job_default_direction(self):
+        """Test that Job defaults to PULL direction"""
+        from src.bardkeeper.data.models import Job, SyncDirection
+
+        job = Job(
+            name="test",
+            host="host",
+            username="user",
+            remote_path="/path",
+            local_path=Path("/local")
+        )
+        self.assertEqual(job.sync_direction, SyncDirection.PULL)
+
+    def test_job_direction_serialization(self):
+        """Test that sync_direction serializes/deserializes correctly"""
+        from src.bardkeeper.data.models import Job, SyncDirection
+
+        # Create job with PUSH direction
+        job = Job(
+            name="test",
+            host="host",
+            username="user",
+            remote_path="/path",
+            local_path=Path("/local"),
+            sync_direction=SyncDirection.PUSH
+        )
+
+        # Serialize to dict
+        data = job.to_dict()
+        self.assertEqual(data['sync_direction'], 'push')
+
+        # Deserialize from dict
+        job2 = Job.from_dict(data)
+        self.assertEqual(job2.sync_direction, SyncDirection.PUSH)
+
+    def test_build_command_pull_direction(self):
+        """Test rsync command for pull direction (remote -> local)"""
+        from src.bardkeeper.data.models import SyncDirection
+
+        rsync_manager = RsyncManager(self.db)
+        job = self.db.get_sync_job(self.job_name)
+        job.sync_direction = SyncDirection.PULL
+
+        cmd = rsync_manager.build_rsync_command(job, SyncDirection.PULL)
+
+        # Verify source is remote (should be second to last arg)
+        source = cmd[-2]
+        destination = cmd[-1]
+
+        self.assertIn("test_user@test_host:", source)
+        self.assertIn(str(job.local_path), destination)
+
+    def test_build_command_push_direction(self):
+        """Test rsync command for push direction (local -> remote)"""
+        from src.bardkeeper.data.models import SyncDirection
+
+        rsync_manager = RsyncManager(self.db)
+        job = self.db.get_sync_job(self.job_name)
+
+        # Create local directory for push test
+        job.local_path.mkdir(parents=True, exist_ok=True)
+
+        cmd = rsync_manager.build_rsync_command(job, SyncDirection.PUSH)
+
+        # Verify source is local, destination is remote
+        source = cmd[-2]
+        destination = cmd[-1]
+
+        self.assertIn(str(job.local_path), source)
+        self.assertIn("test_user@test_host:", destination)
+
+    def test_build_bidirectional_commands(self):
+        """Test that bidirectional creates two commands with --update"""
+        rsync_manager = RsyncManager(self.db)
+        job = self.db.get_sync_job(self.job_name)
+
+        # Create local directory
+        job.local_path.mkdir(parents=True, exist_ok=True)
+
+        pull_cmd, push_cmd = rsync_manager.build_bidirectional_commands(job)
+
+        # Verify both commands have --update flag
+        self.assertIn("--update", pull_cmd)
+        self.assertIn("--update", push_cmd)
+
+        # Verify pull direction: remote -> local
+        pull_source = pull_cmd[-2]
+        pull_dest = pull_cmd[-1]
+        self.assertIn("test_user@test_host:", pull_source)
+        self.assertIn(str(job.local_path), pull_dest)
+
+        # Verify push direction: local -> remote
+        push_source = push_cmd[-2]
+        push_dest = push_cmd[-1]
+        self.assertIn(str(job.local_path), push_source)
+        self.assertIn("test_user@test_host:", push_dest)
+
+    def test_delete_flag_disabled_for_bidirectional(self):
+        """Test that --delete flag is disabled for bidirectional sync"""
+        from src.bardkeeper.data.models import SyncDirection
+
+        rsync_manager = RsyncManager(self.db)
+        job = self.db.get_sync_job(self.job_name)
+        job.delete_remote = True
+
+        # Create local directory
+        job.local_path.mkdir(parents=True, exist_ok=True)
+
+        # PULL: should include --delete
+        cmd_pull = rsync_manager.build_rsync_command(job, SyncDirection.PULL)
+        self.assertIn("--delete", cmd_pull)
+
+        # PUSH: should include --delete
+        cmd_push = rsync_manager.build_rsync_command(job, SyncDirection.PUSH)
+        self.assertIn("--delete", cmd_push)
+
+        # BIDIRECTIONAL: should NOT include --delete (to prevent data loss)
+        pull_cmd, push_cmd = rsync_manager.build_bidirectional_commands(job)
+        self.assertNotIn("--delete", pull_cmd)
+        self.assertNotIn("--delete", push_cmd)
+
+    def test_database_stores_sync_direction(self):
+        """Test that database correctly stores and retrieves sync_direction"""
+        from src.bardkeeper.data.models import SyncDirection
+
+        # Add job with BIDIRECTIONAL direction
+        self.db.add_sync_job(
+            name="bidirectional_job",
+            host="host",
+            username="user",
+            remote_path="/path",
+            local_path=Path(self.temp_dir.name) / "bidirectional",
+            sync_direction=SyncDirection.BIDIRECTIONAL
+        )
+
+        # Retrieve job and verify direction
+        job = self.db.get_sync_job("bidirectional_job")
+        self.assertEqual(job.sync_direction, SyncDirection.BIDIRECTIONAL)
+
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    def test_execute_bidirectional_sync(self, mock_run, mock_popen):
+        """Test that bidirectional sync executes both pull and push operations"""
+        from src.bardkeeper.data.models import SyncDirection
+
+        # Mock SSH connection test
+        mock_ssh_result = Mock()
+        mock_ssh_result.returncode = 0
+        mock_ssh_result.stdout = "bardkeeper-connection-test"
+        mock_ssh_result.stderr = ""
+        mock_run.return_value = mock_ssh_result
+
+        # Mock rsync process (will be called twice)
+        lines = ["sending incremental file list\n", ""]
+        mock_stdout = Mock()
+        mock_stdout.readline = Mock(side_effect=lines * 2)  # Called twice
+
+        mock_process = Mock()
+        mock_process.stdout = mock_stdout
+        mock_process.wait = Mock(return_value=0)
+        mock_popen.return_value = mock_process
+
+        # Execute bidirectional sync
+        rsync_manager = RsyncManager(self.db)
+        job = self.db.get_sync_job(self.job_name)
+        job.local_path.mkdir(parents=True, exist_ok=True)
+
+        result = rsync_manager.execute_bidirectional_sync(job)
+
+        # Verify two rsync operations were executed
+        self.assertEqual(mock_popen.call_count, 2)
+
+        # Verify success
+        self.assertTrue(result.success)
+
+        # Verify log lines contain both phases
+        self.assertIn("--- Push phase ---", result.log_lines)
+
+
 if __name__ == "__main__":
     unittest.main()

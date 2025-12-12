@@ -7,6 +7,11 @@ from typing import Optional
 
 from simple_term_menu import TerminalMenu
 from rich.prompt import Prompt, Confirm, IntPrompt
+from rich.console import Console
+
+from ...data.models import SyncDirection
+
+console = Console()
 
 
 def select_from_menu(title: str, options: list[str]) -> Optional[str]:
@@ -113,6 +118,59 @@ def prompt_for_job_details(existing_job: Optional[dict] = None) -> dict:
         "Delete files not present on remote?",
         default=existing_job.get('delete_remote', True)
     )
+
+    # Sync direction
+    direction_options = {
+        "Pull (Remote → Local) - Safe for backups": SyncDirection.PULL,
+        "Push (Local → Remote) - Overwrites remote": SyncDirection.PUSH,
+        "Bidirectional - Sync both ways (advanced)": SyncDirection.BIDIRECTIONAL
+    }
+
+    # For existing jobs, show current direction or default to PULL
+    current_direction = existing_job.get('sync_direction', 'pull')
+    if isinstance(current_direction, str):
+        # Convert string to enum for comparison
+        try:
+            current_direction_enum = SyncDirection(current_direction)
+        except ValueError:
+            current_direction_enum = SyncDirection.PULL
+    else:
+        current_direction_enum = current_direction
+
+    # Find matching description for current direction
+    default_option = "Pull (Remote → Local) - Safe for backups"
+    for desc, direction in direction_options.items():
+        if direction == current_direction_enum:
+            default_option = desc
+            break
+
+    # Present menu options
+    menu_options = list(direction_options.keys())
+    if existing_job:
+        menu_options.append("Keep current")
+
+    console.print("\n[bold]Sync Direction:[/bold]")
+    selected_direction = select_from_menu(
+        "Select default sync direction:",
+        menu_options
+    )
+
+    if selected_direction and selected_direction != "Keep current":
+        details['sync_direction'] = direction_options[selected_direction]
+
+        # Show warning for bidirectional
+        if details['sync_direction'] == SyncDirection.BIDIRECTIONAL:
+            console.print("\n[bold yellow]⚠️  Bidirectional Sync Limitations:[/bold yellow]")
+            console.print("  • Uses modification times (last-write-wins)")
+            console.print("  • No conflict resolution for simultaneous changes")
+            console.print("  • --delete flag disabled to prevent data loss")
+            console.print("  • Consider pull or push for critical data\n")
+    elif existing_job and selected_direction == "Keep current":
+        # Keep existing direction
+        pass
+    else:
+        # Default to PULL if no selection
+        details['sync_direction'] = SyncDirection.PULL
 
     # Advanced options
     use_bandwidth_limit = Confirm.ask(

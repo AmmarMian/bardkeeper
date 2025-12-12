@@ -16,7 +16,7 @@ try:
 except ImportError:
     croniter = None
 
-from ..data.models import Job, SyncStatus
+from ..data.models import Job, SyncStatus, SyncDirection
 from ..exceptions import (
     JobNotFoundError,
     SyncAlreadyRunningError,
@@ -103,6 +103,7 @@ class SyncManager:
         delete_remote: bool = True,
         bandwidth_limit: Optional[int] = None,
         exclude_patterns: Optional[list[str]] = None,
+        sync_direction: SyncDirection = SyncDirection.PULL,
     ) -> Job:
         """
         Add a new sync job with validation.
@@ -122,6 +123,7 @@ class SyncManager:
             delete_remote: Whether to delete files not present on remote
             bandwidth_limit: Optional bandwidth limit in KB/s
             exclude_patterns: Optional list of exclude patterns
+            sync_direction: Sync direction (pull/push/bidirectional)
 
         Returns:
             Created Job instance
@@ -153,6 +155,7 @@ class SyncManager:
             delete_remote=delete_remote,
             bandwidth_limit=bandwidth_limit,
             exclude_patterns=exclude_patterns or [],
+            sync_direction=sync_direction,
         )
 
     def remove_sync_job(self, name: str, remove_files: bool = False) -> bool:
@@ -197,6 +200,7 @@ class SyncManager:
         progress_callback: Optional[Callable[[SyncProgress], None]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
         use_retry: bool = True,
+        sync_direction: Optional[SyncDirection] = None,
     ):
         """
         Sync a specific job with locking to prevent concurrent runs.
@@ -206,6 +210,7 @@ class SyncManager:
             progress_callback: Optional progress callback
             status_callback: Optional status message callback
             use_retry: Whether to use retry logic
+            sync_direction: Optional direction override (defaults to job.sync_direction)
 
         Returns:
             SyncResult
@@ -217,7 +222,7 @@ class SyncManager:
         """
         # Acquire lock for this job
         with self.lock_manager.acquire_job_lock(name):
-            return self.rsync.sync(name, progress_callback, status_callback, use_retry)
+            return self.rsync.sync(name, progress_callback, status_callback, use_retry, sync_direction)
 
     def should_sync_now(self, job: Job) -> bool:
         """
