@@ -31,6 +31,7 @@ from ..config import ConfigManager
 from ..cli.ui.tables import jobs_table, job_info_table, config_table
 from ..cli.ui.menus import (
     select_from_menu,
+    multi_select_from_menu,
     prompt_for_job_details,
     prompt_for_config_changes,
 )
@@ -249,20 +250,17 @@ def sync_job(name, no_retry, sync_all, override_direction, skip_confirm):
                 raise JobNotFoundError(f"No sync job found with name '{name}'")
             jobs_to_sync = [name]
         else:
-            # Interactive mode
+            # Interactive mode with multi-select
+            console.print("[cyan]Select jobs to sync (Space to select, Enter to confirm):[/cyan]")
             job_names = [j.name for j in jobs]
-            job_names.append("All jobs")
-            job_names.append("Cancel")
 
-            selection = select_from_menu("Select job to sync:", job_names)
+            selections = multi_select_from_menu("Select job(s) to sync:", job_names)
 
-            if not selection or selection == "Cancel":
+            if not selections:
                 console.print("[yellow]Cancelled.[/yellow]")
                 return
-            elif selection == "All jobs":
-                jobs_to_sync = [j.name for j in jobs]
-            else:
-                jobs_to_sync = [selection]
+
+            jobs_to_sync = selections
 
         # Map string direction to enum
         sync_direction_override = None

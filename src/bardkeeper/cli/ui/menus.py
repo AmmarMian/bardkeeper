@@ -40,6 +40,41 @@ def select_from_menu(title: str, options: list[str]) -> Optional[str]:
     return options[menu_index] if menu_index is not None else None
 
 
+def multi_select_from_menu(title: str, options: list[str]) -> list[str]:
+    """
+    Display a terminal menu with multi-select and return selected options.
+
+    Args:
+        title: Menu title
+        options: List of menu options
+
+    Returns:
+        List of selected options (empty list if cancelled)
+    """
+    terminal_menu = TerminalMenu(
+        options,
+        title=title,
+        menu_cursor="➤ ",
+        menu_cursor_style=("fg_cyan", "bold"),
+        menu_highlight_style=("bg_cyan", "fg_black"),
+        multi_select=True,
+        show_multi_select_hint=True,
+    )
+
+    # Show menu and get selections
+    menu_indices = terminal_menu.show()
+
+    # Return selected options or empty list if cancelled
+    if menu_indices is None:
+        return []
+
+    # Handle both single index (when Enter is pressed) and tuple of indices
+    if isinstance(menu_indices, int):
+        return [options[menu_indices]]
+    else:
+        return [options[i] for i in menu_indices]
+
+
 def prompt_for_job_details(existing_job: Optional[dict] = None) -> dict:
     """
     Interactive prompt for job details.
