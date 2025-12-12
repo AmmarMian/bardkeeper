@@ -1,0 +1,79 @@
+[project]
+name = "bardkeeper"
+version = "2.0.0"
+description = "A reliable rsync job manager CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Ammar Mian"}
+]
+keywords = ["rsync", "backup", "sync", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+]
+
+dependencies = [
+    "tinydb>=4.8.0,<5.0.0",
+    "rich>=13.0.0,<14.0.0",
+    "click>=8.1.0,<9.0.0",
+    "simple-term-menu>=1.6.0,<2.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "croniter>=2.0.0,<3.0.0",
+    "filelock>=3.12.0,<4.0.0",
+    "pytest>=8.4.2",
+    "coverage>=7.10.7",
+    "pytest-cov>=7.0.0",
+    "rich_click"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.2.0",
+    "pytest-mock>=3.11.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "pre-commit>=3.4.0",
+]
+
+[project.scripts]
+bardkeeper = "bardkeeper.cli.main:cli"
+bk = "bardkeeper.cli.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bardkeeper"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = false
+warn_return_any = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=bardkeeper --cov-report=term-missing"
+timeout = 60
