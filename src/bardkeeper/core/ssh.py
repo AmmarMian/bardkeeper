@@ -9,7 +9,6 @@ Features:
 5. SSH multiplexing for performance
 """
 
-import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,8 +62,12 @@ class SSHConfig:
         return parts
 
     def get_ssh_command_string(self) -> str:
-        """Get SSH command as a properly quoted string."""
-        return " ".join(shlex.quote(arg) for arg in self.get_ssh_command())
+        """Get SSH command as a space-separated string for rsync -e flag.
+
+        Note: No quoting needed since rsync parses this itself.
+        Using shlex.quote() causes issues with older rsync versions on macOS.
+        """
+        return " ".join(self.get_ssh_command())
 
 
 def test_ssh_connection(config: SSHConfig) -> tuple[bool, str]:
