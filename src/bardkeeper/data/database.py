@@ -2,7 +2,6 @@
 Database handler for BardKeeper using TinyDB with Pydantic models.
 """
 
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -75,11 +74,6 @@ class BardkeeperDB:
         # Expand local path
         local_path = Path(local_path).expanduser().resolve()
 
-        # If the local_path doesn't include the remote directory name, append it
-        remote_basename = os.path.basename(os.path.normpath(remote_path))
-        if not str(local_path).endswith(remote_basename):
-            local_path = local_path / remote_basename
-
         # Create and validate job with Pydantic
         job = Job(
             name=name,
@@ -124,18 +118,9 @@ class BardkeeperDB:
         if not current_job:
             raise JobNotFoundError(f"Sync job '{name}' not found")
 
-        # If updating local_path, expand the path and handle remote basename
+        # If updating local_path, expand the path
         if "local_path" in kwargs:
             local_path = Path(kwargs["local_path"]).expanduser().resolve()
-
-            # If remote_path is being updated, use that instead
-            remote_path = kwargs.get("remote_path", current_job.remote_path)
-            remote_basename = os.path.basename(os.path.normpath(remote_path))
-
-            # If the local_path doesn't include the remote basename, append it
-            if not str(local_path).endswith(remote_basename):
-                local_path = local_path / remote_basename
-
             kwargs["local_path"] = local_path
 
         # Update the current job data
