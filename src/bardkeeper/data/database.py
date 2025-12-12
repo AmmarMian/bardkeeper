@@ -28,8 +28,8 @@ class BardkeeperDB:
         # Initialize TinyDB
         try:
             self.db = TinyDB(str(self.db_path))
-            self.sync_jobs = self.db.table('sync_jobs')
-            self.config = self.db.table('config')
+            self.sync_jobs = self.db.table("sync_jobs")
+            self.config = self.db.table("config")
         except Exception as e:
             raise DatabaseError(f"Failed to initialize database: {e}")
 
@@ -37,12 +37,15 @@ class BardkeeperDB:
         if not self.config.all():
             default_config = Config(
                 db_path=self.db_path,
-                compression_command='tar -czf',
-                extraction_command='tar -xzf',
+                compression_command="tar -czf",
+                extraction_command="tar -xzf",
                 cache_enabled=False,
-                cache_dir=Path("~/.bardkeeper/cache").expanduser()
+                cache_dir=Path("~/.bardkeeper/cache").expanduser(),
             )
-            self.config.insert(default_config.model_dump())
+            data = default_config.model_dump()
+            data["db_path"] = str(data["db_path"])
+            data["cache_dir"] = str(data["cache_dir"])
+            self.config.insert(data)
 
     def add_sync_job(
         self,
@@ -120,18 +123,18 @@ class BardkeeperDB:
             raise JobNotFoundError(f"Sync job '{name}' not found")
 
         # If updating local_path, expand the path and handle remote basename
-        if 'local_path' in kwargs:
-            local_path = Path(kwargs['local_path']).expanduser().resolve()
+        if "local_path" in kwargs:
+            local_path = Path(kwargs["local_path"]).expanduser().resolve()
 
             # If remote_path is being updated, use that instead
-            remote_path = kwargs.get('remote_path', current_job.remote_path)
+            remote_path = kwargs.get("remote_path", current_job.remote_path)
             remote_basename = os.path.basename(os.path.normpath(remote_path))
 
             # If the local_path doesn't include the remote basename, append it
             if not str(local_path).endswith(remote_basename):
                 local_path = local_path / remote_basename
 
-            kwargs['local_path'] = local_path
+            kwargs["local_path"] = local_path
 
         # Update the current job data
         job_dict = current_job.to_dict()
@@ -162,27 +165,27 @@ class BardkeeperDB:
         JobQuery = Query()
 
         update_data = {
-            'last_synced': timestamp.isoformat(),
-            'sync_status': SyncStatus.COMPLETED.value,
+            "last_synced": timestamp.isoformat(),
+            "sync_status": SyncStatus.COMPLETED.value,
         }
 
         if duration is not None:
-            update_data['last_sync_duration'] = duration
+            update_data["last_sync_duration"] = duration
         if bytes_transferred is not None:
-            update_data['bytes_transferred'] = bytes_transferred
+            update_data["bytes_transferred"] = bytes_transferred
 
         self.sync_jobs.update(update_data, JobQuery.name == name)
 
     def update_sync_status(self, name: str, status: SyncStatus, error: Optional[str] = None):
         """Update the sync_status field of a job."""
         JobQuery = Query()
-        update_data = {'sync_status': status.value}
+        update_data = {"sync_status": status.value}
 
         if error:
-            update_data['last_error'] = error
+            update_data["last_error"] = error
         elif status == SyncStatus.COMPLETED:
             # Clear error on successful completion
-            update_data['last_error'] = None
+            update_data["last_error"] = None
 
         self.sync_jobs.update(update_data, JobQuery.name == name)
 
