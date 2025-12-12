@@ -27,6 +27,33 @@ from ..cli.ui.progress import parse_rsync_progress, SyncProgress
 logger = logging.getLogger(__name__)
 
 
+def detect_rsync_type() -> str:
+    """
+    Detect the type of rsync installed (GNU rsync or openrsync/BSD).
+
+    Returns:
+        'openrsync' if BSD implementation is detected, 'gnu' otherwise
+    """
+    try:
+        result = subprocess.run(
+            ['rsync', '--version'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        output = result.stdout + result.stderr
+
+        if 'openrsync' in output.lower():
+            logger.debug("Detected openrsync (BSD implementation)")
+            return 'openrsync'
+        else:
+            logger.debug("Detected GNU rsync")
+            return 'gnu'
+    except Exception as e:
+        logger.warning(f"Could not detect rsync type: {e}, assuming GNU rsync")
+        return 'gnu'
+
+
 @dataclass
 class SyncResult:
     """Result of a sync operation."""
@@ -64,6 +91,62 @@ class RsyncManager:
         """Initialize the rsync manager."""
         self.db = db
         self.compression_manager = compression_manager or CompressionManager()
+        self._wrapper_script_path: Optional[Path] = None
+        self._rsync_type = detect_rsync_type()
+
+    def _create_ssh_wrapper_script(self, ssh_config: SSHConfig) -> Path:
+        """
+        Create a temporary wrapper script for SSH command.
+
+        This is necessary for openrsync (BSD) which doesn't properly parse
+        complex SSH command strings passed via -e option.
+
+        Args:
+            ssh_config: SSH configuration
+
+        Returns:
+            Path to the created wrapper script
+        """
+        # Create wrapper script in a temporary location
+        fd, script_path = tempfile.mkstemp(suffix='.sh', prefix='bardkeeper_ssh_')
+        script_path = Path(script_path)
+
+        try:
+            # Build the SSH command
+            ssh_parts = ssh_config.get_ssh_command()
+
+            # Write the wrapper script
+            with os.fdopen(fd, 'w') as f:
+                f.write("#!/bin/sh\n")
+                f.write("# Auto-generated SSH wrapper for BardKeeper\n")
+                f.write("# This script will be automatically deleted after sync\n\n")
+
+                # Build the exec line - all parts except 'ssh' itself, then add "$@" for additional args
+                ssh_options = ' '.join(shlex.quote(arg) for arg in ssh_parts[1:])
+                f.write(f'exec ssh {ssh_options} "$@"\n')
+
+            # Make script executable
+            script_path.chmod(0o700)
+
+            logger.debug(f"Created SSH wrapper script at {script_path}")
+            return script_path
+
+        except Exception as e:
+            # Clean up on error
+            if script_path.exists():
+                script_path.unlink()
+            raise SyncError(f"Failed to create SSH wrapper script: {e}")
+
+    def _cleanup_wrapper_script(self):
+        """Clean up temporary wrapper script if it exists."""
+        if self._wrapper_script_path and self._wrapper_script_path.exists():
+            try:
+                self._wrapper_script_path.unlink()
+                logger.debug(f"Cleaned up wrapper script: {self._wrapper_script_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up wrapper script: {e}")
+            finally:
+                self._wrapper_script_path = None
 
     def build_rsync_command(self, job: Job) -> list[str]:
         """Build rsync command with proper progress flags and SSH options."""
@@ -72,9 +155,14 @@ class RsyncManager:
         # Basic flags
         cmd.extend(["-avh"])  # archive, verbose, human-readable
 
-        # Progress tracking - use --info=progress2 for total progress
+        # Progress tracking - use different flags based on rsync type
         if job.track_progress:
-            cmd.extend(["--info=progress2", "--no-inc-recursive"])
+            if self._rsync_type == 'openrsync':
+                # OpenRSync only supports basic --progress flag
+                cmd.append("--progress")
+            else:
+                # GNU rsync supports more advanced progress reporting
+                cmd.extend(["--info=progress2", "--no-inc-recursive"])
 
         # Compression for transfer
         cmd.append("-z")
@@ -102,8 +190,18 @@ class RsyncManager:
             key_path=job.ssh_key_path,
             connect_timeout=job.ssh_timeout,
         )
-        ssh_cmd = ssh_config.get_ssh_command_string()
-        cmd.extend(["-e", ssh_cmd])
+
+        # Handle SSH command based on rsync type
+        if self._rsync_type == 'openrsync':
+            # OpenRSync (BSD) doesn't handle complex SSH strings well
+            # Use a wrapper script instead
+            self._wrapper_script_path = self._create_ssh_wrapper_script(ssh_config)
+            cmd.extend(["-e", str(self._wrapper_script_path)])
+            logger.debug(f"Using SSH wrapper script for openrsync: {self._wrapper_script_path}")
+        else:
+            # GNU rsync can handle the SSH command string directly
+            ssh_cmd = ssh_config.get_ssh_command_string()
+            cmd.extend(["-e", ssh_cmd])
 
         # Source (remote) - ensure trailing slash to copy contents
         remote = f"{job.username}@{job.host}:{job.remote_path}"
@@ -229,6 +327,9 @@ class RsyncManager:
             if not isinstance(e, (RsyncError, SSHTimeoutError, SSHAuthenticationError)):
                 raise SyncError(f"Sync failed: {e}")
             raise
+        finally:
+            # Always clean up wrapper script if it was created
+            self._cleanup_wrapper_script()
 
     def sync_with_retry(
         self,

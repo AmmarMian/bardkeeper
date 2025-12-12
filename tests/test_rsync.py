@@ -55,8 +55,11 @@ class TestRsyncManager(unittest.TestCase):
         self.assertEqual(cmd[0], "rsync")
         self.assertIn("-avh", cmd)  # Archive, verbose, human-readable
         self.assertIn("-z", cmd)  # Compression
-        # New API uses --info=progress2 instead of --progress
-        self.assertIn("--info=progress2", cmd)  # Progress tracking
+        # Progress tracking - depends on rsync type
+        if self.rsync_manager._rsync_type == 'openrsync':
+            self.assertIn("--progress", cmd)
+        else:
+            self.assertIn("--info=progress2", cmd)
         self.assertIn("--delete", cmd)
         self.assertIn("--itemize-changes", cmd)
 
@@ -216,6 +219,197 @@ class TestRsyncManager(unittest.TestCase):
         self.assertTrue(any("dir1" in line for line in tree))
         self.assertTrue(any("dir2" in line for line in tree))
         self.assertTrue(any("file1.txt" in line for line in tree))
+
+
+class TestOpenRsyncWrapper(unittest.TestCase):
+    """Test cases for openrsync wrapper script functionality"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_db.json"
+        self.db = BardkeeperDB(self.db_path)
+
+        # Create a mock job
+        self.job_name = "test_job"
+        self.db.add_sync_job(
+            name=self.job_name,
+            host="test_host",
+            username="test_user",
+            remote_path="/remote/path",
+            local_path=Path(self.temp_dir.name) / "local_path",
+            use_compression=False,
+            cron_schedule=None,
+            track_progress=True
+        )
+
+    def tearDown(self):
+        """Tear down test fixtures"""
+        self.temp_dir.cleanup()
+
+    def test_detect_rsync_type_openrsync(self):
+        """Test detection of openrsync"""
+        from src.bardkeeper.core.rsync import detect_rsync_type
+
+        with patch('subprocess.run') as mock_run:
+            mock_result = Mock()
+            mock_result.stdout = "openrsync: protocol version 29"
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            rsync_type = detect_rsync_type()
+            self.assertEqual(rsync_type, 'openrsync')
+
+    def test_detect_rsync_type_gnu(self):
+        """Test detection of GNU rsync"""
+        from src.bardkeeper.core.rsync import detect_rsync_type
+
+        with patch('subprocess.run') as mock_run:
+            mock_result = Mock()
+            mock_result.stdout = "rsync  version 3.2.3  protocol version 31"
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            rsync_type = detect_rsync_type()
+            self.assertEqual(rsync_type, 'gnu')
+
+    def test_wrapper_script_creation(self):
+        """Test SSH wrapper script creation"""
+        from src.bardkeeper.core.ssh import SSHConfig
+
+        rsync_manager = RsyncManager(self.db)
+        ssh_config = SSHConfig(
+            host="test_host",
+            username="test_user",
+            port=22,
+            key_path=None,
+            connect_timeout=30
+        )
+
+        # Create wrapper script
+        wrapper_path = rsync_manager._create_ssh_wrapper_script(ssh_config)
+
+        try:
+            # Check script exists
+            self.assertTrue(wrapper_path.exists())
+
+            # Check script is executable
+            self.assertTrue(os.access(wrapper_path, os.X_OK))
+
+            # Check script content
+            content = wrapper_path.read_text()
+            self.assertIn("#!/bin/sh", content)
+            self.assertIn("exec ssh", content)
+            self.assertIn("ConnectTimeout=30", content)
+
+        finally:
+            # Clean up
+            if wrapper_path.exists():
+                wrapper_path.unlink()
+
+    def test_wrapper_script_cleanup(self):
+        """Test that wrapper scripts are cleaned up"""
+        from src.bardkeeper.core.ssh import SSHConfig
+
+        rsync_manager = RsyncManager(self.db)
+        ssh_config = SSHConfig(
+            host="test_host",
+            username="test_user",
+            port=22,
+            key_path=None,
+            connect_timeout=30
+        )
+
+        # Create wrapper script
+        wrapper_path = rsync_manager._create_ssh_wrapper_script(ssh_config)
+        rsync_manager._wrapper_script_path = wrapper_path
+
+        # Verify it exists
+        self.assertTrue(wrapper_path.exists())
+
+        # Clean up
+        rsync_manager._cleanup_wrapper_script()
+
+        # Verify it's deleted
+        self.assertFalse(wrapper_path.exists())
+        self.assertIsNone(rsync_manager._wrapper_script_path)
+
+    def test_build_command_with_openrsync(self):
+        """Test that wrapper script is used with openrsync"""
+        # Force openrsync type
+        rsync_manager = RsyncManager(self.db)
+        rsync_manager._rsync_type = 'openrsync'
+
+        job = self.db.get_sync_job(self.job_name)
+        cmd = rsync_manager.build_rsync_command(job)
+
+        # Check that -e option points to a script file
+        e_index = cmd.index('-e')
+        ssh_cmd = cmd[e_index + 1]
+
+        # Should be a path to wrapper script, not a command string
+        self.assertTrue(ssh_cmd.startswith('/'))
+        self.assertTrue('ssh' not in ssh_cmd or ssh_cmd.endswith('.sh'))
+
+        # Clean up the created wrapper script
+        if rsync_manager._wrapper_script_path:
+            rsync_manager._cleanup_wrapper_script()
+
+    def test_build_command_with_gnu_rsync(self):
+        """Test that command string is used with GNU rsync"""
+        # Force GNU rsync type
+        rsync_manager = RsyncManager(self.db)
+        rsync_manager._rsync_type = 'gnu'
+
+        job = self.db.get_sync_job(self.job_name)
+        cmd = rsync_manager.build_rsync_command(job)
+
+        # Check that -e option contains SSH command string
+        e_index = cmd.index('-e')
+        ssh_cmd = cmd[e_index + 1]
+
+        # Should be a command string, not a file path
+        self.assertIn('ssh', ssh_cmd)
+        self.assertIn('ConnectTimeout=30', ssh_cmd)
+
+        # No wrapper script should be created
+        self.assertIsNone(rsync_manager._wrapper_script_path)
+
+    @patch('subprocess.Popen')
+    @patch('subprocess.run')
+    def test_wrapper_cleanup_after_sync(self, mock_run, mock_popen):
+        """Test that wrapper script is cleaned up after sync"""
+        # Mock SSH connection test
+        mock_ssh_result = Mock()
+        mock_ssh_result.returncode = 0
+        mock_ssh_result.stdout = "bardkeeper-connection-test"
+        mock_ssh_result.stderr = ""
+        mock_run.return_value = mock_ssh_result
+
+        # Mock rsync process
+        lines = ["sending incremental file list\n", ""]
+        mock_stdout = Mock()
+        mock_stdout.readline = Mock(side_effect=lines)
+
+        mock_process = Mock()
+        mock_process.stdout = mock_stdout
+        mock_process.wait = Mock(return_value=0)
+        mock_popen.return_value = mock_process
+
+        # Force openrsync type
+        rsync_manager = RsyncManager(self.db)
+        rsync_manager._rsync_type = 'openrsync'
+
+        job = self.db.get_sync_job(self.job_name)
+
+        # Execute sync
+        result = rsync_manager.execute_sync(job)
+
+        # Check that sync succeeded
+        self.assertTrue(result.success)
+
+        # Check that wrapper script was cleaned up
+        self.assertIsNone(rsync_manager._wrapper_script_path)
 
 
 if __name__ == "__main__":
