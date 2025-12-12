@@ -170,14 +170,39 @@ def add_job(name, host, username, remote_path, local_path, ssh_port, ssh_key,
 
 # === REMOVE COMMAND ===
 @cli.command("remove")
-@click.argument('name')
+@click.argument('name', required=False)
 @click.option('--remove-files', is_flag=True, help='Also remove local files')
 def remove_job(name, remove_files):
-    """Remove a sync job."""
+    """Remove a sync job. If no name provided, shows interactive menu."""
     try:
-        # Confirm deletion
         from rich.prompt import Confirm
-        if not Confirm.ask(f"Remove sync job '{name}'?"):
+
+        # Get all jobs
+        jobs = app_ctx.db.get_all_sync_jobs()
+        if not jobs:
+            console.print("[yellow]No sync jobs found.[/yellow]")
+            return
+
+        # Select job if not provided
+        if not name:
+            job_names = [j.name for j in jobs]
+            job_names.append("Cancel")
+
+            name = select_from_menu("Select job to remove:", job_names)
+
+            if not name or name == "Cancel":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return
+
+            # Ask about removing files if not specified via flag
+            if not remove_files:
+                remove_files = Confirm.ask(
+                    "Also remove local files and archives?",
+                    default=False
+                )
+
+        # Confirm deletion
+        if not Confirm.ask(f"[bold red]Remove sync job '{name}'?[/bold red]"):
             console.print("[yellow]Cancelled.[/yellow]")
             return
 
@@ -301,10 +326,27 @@ def sync_job(name, no_retry, sync_all):
 
 # === INFO COMMAND ===
 @cli.command("info")
-@click.argument('name')
+@click.argument('name', required=False)
 def job_info(name):
-    """Show detailed information about a sync job."""
+    """Show detailed information about a sync job. If no name provided, shows interactive menu."""
     try:
+        # Get all jobs
+        jobs = app_ctx.db.get_all_sync_jobs()
+        if not jobs:
+            console.print("[yellow]No sync jobs found. Add one with 'bardkeeper add'.[/yellow]")
+            return
+
+        # Select job if not provided
+        if not name:
+            job_names = [j.name for j in jobs]
+            job_names.append("Cancel")
+
+            name = select_from_menu("Select job to view:", job_names)
+
+            if not name or name == "Cancel":
+                console.print("[yellow]Cancelled.[/yellow]")
+                return
+
         job = app_ctx.db.get_sync_job(name)
         if not job:
             raise JobNotFoundError(f"No sync job found with name '{name}'")
